@@ -1,5 +1,3 @@
-
-
 #!/bin/bash
 
 # Set source and destination clusters
@@ -165,4 +163,3 @@ main() {
 
 # Start the process
 main
---
