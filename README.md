@@ -1,5 +1,3 @@
-
-
 #!/bin/bash
 
 # Set source and destination clusters
@@ -40,7 +38,7 @@ cleanup_applied_resources() {
     echo "Rolling back applied resources..."
     while read -r line; do
       echo "Deleting $line..."
-      kubectl delete -f $line
+      kubectl delete -f "$line"
     done < "$APPLIED_RESOURCES_FILE"
     echo "Rollback completed."
   else
@@ -72,12 +70,12 @@ export_resources() {
       if [ "$resource" == "namespace" ]; then
         # Special handling for namespace resource
         echo "Exporting namespace $namespace..."
-        kubectl get $resource $namespace -o yaml > ${resource}_${namespace}.yaml
+        kubectl get "$resource" "$namespace" -o yaml > ${resource}_${namespace}.yaml
         # Clean up YAML (optional)
         yq eval 'del(.metadata.creationTimestamp, .metadata.resourceVersion, .metadata.uid, .status)' ${resource}_${namespace}.yaml -o yaml > clean-${resource}_${namespace}.yaml
       else
         echo "Exporting $resource from namespace $namespace..."
-        kubectl get $resource -n $namespace -o yaml > ${resource}_${namespace}.yaml
+        kubectl get "$resource" -n "$namespace" -o yaml > ${resource}_${namespace}.yaml
         # Clean up YAML (optional)
         yq eval 'del(.metadata.creationTimestamp, .metadata.resourceVersion, .metadata.uid, .status)' ${resource}_${namespace}.yaml -o yaml > clean-${resource}_${namespace}.yaml
       fi
@@ -165,4 +163,4 @@ main() {
 
 # Start the process
 main
---
+
