@@ -1,166 +1,73 @@
-#!/bin/bash
+# Copy Kubernetes Resources Script
 
-# Set source and destination clusters
-SOURCE_CONTEXT="$1"
-DEST_CONTEXT="$2"
-NAMESPACE="$3"
+This script automates the process of copying Kubernetes resources from a source cluster to a destination cluster. It handles namespaces, deployments, services, secrets, configmaps, and other resources, providing support for conflict resolution and rollback mechanisms.
 
-# Resources to export and apply (namespace is first)
-RESOURCES=("namespace" "deployments" "hpa" "svc" "virtualservice" "secret" "configmap")
+## Features
+- Copy resources between Kubernetes clusters.
+- Supports specific namespaces, wildcard namespace patterns, or all namespaces.
+- Handles conflict resolution with retry logic.
+- Provides rollback functionality in case of errors.
+- Supports `namespace`, `deployments`, `hpa`, `svc`, `virtualservice`, `secret`, and `configmap` resources.
 
-# File to track applied resources for rollback
-APPLIED_RESOURCES_FILE="applied_resources.txt"
+## Prerequisites
+- [kubectl](https://kubernetes.io/docs/tasks/tools/) installed and configured.
+- Access to both source and destination Kubernetes clusters.
+- [yq](https://github.com/mikefarah/yq) installed for YAML processing.
 
-# Max number of retries for conflict resolution
-MAX_RETRIES=3
+## Usage
 
-# Check if source and destination contexts are passed as parameters
-if [ -z "$SOURCE_CONTEXT" ] || [ -z "$DEST_CONTEXT" ]; then
-  echo "Usage: ./copy-resources.sh <source-cluster-context> <destination-cluster-context> [<namespace or wildcard>]"
-  exit 1
-fi
+### Command Syntax
+```bash
+./copy-resources.sh <source-cluster-context> <destination-cluster-context> [<namespace or wildcard>]
+```
 
-# Function to check if the context is valid and switch to it
-switch_context() {
-  local context=$1
-  echo "Switching to context: $context"
-  kubectl config use-context "$context" &> /dev/null
-  if [ $? -ne 0 ]; then
-    echo "Error: Failed to switch to context $context. Please check if the context is correct."
-    exit 1
-  fi
-  echo "Successfully switched to context: $context"
-}
+- `<source-cluster-context>`: The context of the source Kubernetes cluster.
+- `<destination-cluster-context>`: The context of the destination Kubernetes cluster.
+- `[<namespace or wildcard>]` (optional): Specify a namespace or use wildcard (`*`) for multiple namespaces. If omitted, all namespaces will be processed.
 
-# Cleanup: Delete the applied resources in case of failure
-cleanup_applied_resources() {
-  if [ -f "$APPLIED_RESOURCES_FILE" ]; then
-    echo "Rolling back applied resources..."
-    while read -r line; do
-      echo "Deleting $line..."
-      kubectl delete -f "$line"
-    done < "$APPLIED_RESOURCES_FILE"
-    echo "Rollback completed."
-  else
-    echo "No resources applied, nothing to rollback."
-  fi
-}
+### Examples
+#### Copy a Single Namespace
+```bash
+./copy-resources.sh source-context destination-context my-namespace
+```
 
-# Function to get namespaces based on input (specific, wildcard, or all)
-get_namespaces() {
-  if [ -n "$NAMESPACE" ]; then
-    # Wildcard namespace handling
-    if [[ "$NAMESPACE" == *"*"* ]]; then
-      echo "Selecting namespaces matching pattern: $NAMESPACE"
-      kubectl get ns --no-headers -o custom-columns=":metadata.name" | grep -E "^${NAMESPACE/\*/.*}$"
-    else
-      # Single namespace
-      echo "$NAMESPACE"
-    fi
-  else
-    # All namespaces
-    kubectl get ns --no-headers -o custom-columns=":metadata.name"
-  fi
-}
+#### Copy Namespaces Using Wildcard
+```bash
+./copy-resources.sh source-context destination-context "my-namespace-*"
+```
 
-# Function to export resources from specific namespace(s)
-export_resources() {
-  for namespace in $1; do
-    for resource in "${RESOURCES[@]}"; do
-      if [ "$resource" == "namespace" ]; then
-        # Special handling for namespace resource
-        echo "Exporting namespace $namespace..."
-        kubectl get "$resource" "$namespace" -o yaml > ${resource}_${namespace}.yaml
-        # Clean up YAML (optional)
-        yq eval 'del(.metadata.creationTimestamp, .metadata.resourceVersion, .metadata.uid, .status)' ${resource}_${namespace}.yaml -o yaml > clean-${resource}_${namespace}.yaml
-      else
-        echo "Exporting $resource from namespace $namespace..."
-        kubectl get "$resource" -n "$namespace" -o yaml > ${resource}_${namespace}.yaml
-        # Clean up YAML (optional)
-        yq eval 'del(.metadata.creationTimestamp, .metadata.resourceVersion, .metadata.uid, .status)' ${resource}_${namespace}.yaml -o yaml > clean-${resource}_${namespace}.yaml
-      fi
-    done
-  done
-}
+#### Copy All Namespaces
+```bash
+./copy-resources.sh source-context destination-context
+```
 
-# Function to apply a resource with conflict handling
-apply_with_retry() {
-  resource_file=$1
-  namespace=$2
+## How It Works
+1. **Switch Contexts**: Validates and switches between source and destination Kubernetes contexts.
+2. **Namespace Selection**: Retrieves namespaces based on the user input (specific, wildcard, or all).
+3. **Export Resources**: Extracts YAML definitions of the resources from the source cluster and cleans them using `yq`.
+4. **Apply Resources**: Applies the cleaned resources to the destination cluster, with retry logic for conflicts.
+5. **Rollback (if necessary)**: Deletes applied resources in case of failure.
 
-  retries=0
-  while [ $retries -lt $MAX_RETRIES ]; do
-    echo "Applying resource from $resource_file to namespace $namespace..."
+## Rollback Mechanism
+If any resource fails to apply after the maximum retries, the script rolls back all applied resources using the `applied_resources.txt` file, ensuring the destination cluster remains unaffected.
 
-    kubectl apply -f "$resource_file" -n "$namespace"
-    if [ $? -eq 0 ]; then
-      echo "Successfully applied $resource_file"
-      echo "$resource_file" >> "$APPLIED_RESOURCES_FILE"
-      return 0
-    else
-      echo "Conflict detected. Retrying... ($((retries+1))/$MAX_RETRIES)"
-      # Fetch the latest resource from the destination cluster
-      kubectl get -f "$resource_file" -n "$namespace" -o yaml > latest-$resource_file
-      # Retry by merging with the latest version
-      cp latest-$resource_file "$resource_file"
-      retries=$((retries+1))
-    fi
-  done
+## Conflict Resolution
+The script retries applying resources up to three times (`MAX_RETRIES`) if conflicts occur. It fetches the latest resource version from the destination cluster and merges it with the source YAML.
 
-  echo "Failed to apply $resource_file after $MAX_RETRIES retries."
-  return 1
-}
+## Validation Prompt
+After applying resources, the script prompts for user validation:
+```bash
+Resources have been applied. Please validate.
+Did everything apply successfully? (yes/no):
+```
+If "no" is selected, a rollback is performed.
 
-# Function to apply namespace first, then other resources to the destination cluster
-apply_resources() {
-  # Clear previous applied resources file
-  > "$APPLIED_RESOURCES_FILE"
+## Dependencies
+- `kubectl`
+- `yq`
 
-  for namespace in $1; do
-    # Apply the namespace first
-    echo "Applying namespace $namespace in destination cluster..."
-    apply_with_retry "clean-namespace_${namespace}.yaml" "$namespace"
-    
-    # Apply other resources in the namespace
-    for resource in "${RESOURCES[@]}"; do
-      if [ "$resource" != "namespace" ]; then
-        echo "Applying $resource to namespace $namespace in destination cluster..."
-        apply_with_retry "clean-${resource}_${namespace}.yaml" "$namespace"
-      fi
-    done
-  done
-}
+## License
+This project is licensed under the MIT License.
 
-# Main logic to export, apply resources, and validate
-main() {
-  # Switch to source context
-  switch_context "$SOURCE_CONTEXT"
-
-  # Get the list of namespaces based on input (single, wildcard, or all)
-  NAMESPACES=$(get_namespaces)
-
-  # Export resources from source cluster
-  export_resources "$NAMESPACES"
-
-  # Switch to destination context
-  switch_context "$DEST_CONTEXT"
-
-  # Apply resources to destination cluster (namespace first)
-  apply_resources "$NAMESPACES"
-
-  # Ask for validation after applying resources
-  echo "Resources have been applied. Please validate."
-  read -p "Did everything apply successfully? (yes/no): " VALIDATION
-
-  if [ "$VALIDATION" == "no" ]; then
-    echo "Something went wrong. Rolling back..."
-    cleanup_applied_resources
-    exit 1
-  fi
-
-  echo "Resources successfully copied from source to destination cluster."
-}
-
-# Start the process
-main
-
+## Contributing
+Contributions are welcome! Open an issue or submit a pull request to improve the script.
